@@ -1,0 +1,103 @@
+<!doctype html>
+<html lang="ja">
+
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>{{ title }}</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+    <link rel="icon" type="image/svg+xml"
+        href='data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><text y="0.9em" font-size="90">👄</text></svg>'>
+</head>
+
+<body>
+    <div class="wrap">
+        <header class="topbar">
+            <div class="topbar-row">
+                <div>
+                    <div class="title">{{ title }}</div>
+                    <div class="sub">Akira Takasugi</div>
+                </div>
+
+                <div class="model-pill">{{ model_label }}</div>
+            </div>
+        </header>
+
+        <main class="grid">
+            <section class="card">
+                <h2>1) 入出力フォルダ</h2>
+
+                <label>入力フォルダ（読み取り）</label>
+                <input id="inputDir" type="text" placeholder="例：C:\data\source" />
+
+                <label>出力フォルダ（保存先）</label>
+                <input id="outputDir" type="text" placeholder="例：C:\data\out_md" />
+
+                <label class="row">
+                    <input id="recursive" type="checkbox" checked />
+                    <span>サブフォルダも対象（再帰）</span>
+                </label>
+
+                <div class="row2">
+                    <button id="scanBtn">対象ファイルをスキャン</button>
+                    <button id="runBtn" class="primary">変換を開始</button>
+                </div>
+
+                <div class="hint">
+                    対象拡張子：txt / md / csv / json / log / html / xml / yml / ini / py / js / css / docx / pdf（app.pyで変更可能）
+                </div>
+            </section>
+
+            <section class="card">
+                <h2>2) 生成AI API（サーバー側設定）</h2>
+
+                {% if api_ready %}
+                <div class="hint">
+                    APIサーバーとAPIキーは <b>.env</b> で管理され、ブラウザUIからは入力しません。
+                </div>
+                {% else %}
+                <div class="hint" style="color:#ef9a9a;">
+                    .env に <b>DIFY_API_BASE</b> / <b>DIFY_API_KEY</b> を設定してください（未設定）。
+                </div>
+                {% endif %}
+
+                <label>user（任意）</label>
+                <input id="user" type="text" value="rag_converter" />
+
+                <label>変換スタイル</label>
+                <select id="style">
+                    <option value="rag_markdown" selected>RAG向けMarkdown（標準）</option>
+                    <option value="rag_natural">RAG向けMarkdown（自然言語）</option>
+                    <option value="faq">FAQ形式</option>
+                </select>
+
+                <label>チャンク区切り文字（単独行）</label>
+                <input id="chunkSep" type="text" value="***" />
+            </section>
+
+            <section class="card full">
+                <h2>3) 対象ファイル / 進捗</h2>
+                <div class="split">
+                    <div>
+                        <div class="miniTitle">対象ファイル</div>
+                        <div id="fileList" class="box mono"></div>
+                    </div>
+                    <div>
+                        <div class="miniTitle">ログ</div>
+                        <div id="log" class="box mono"></div>
+                    </div>
+                </div>
+            </section>
+        </main>
+
+        <footer class="footer">
+            <span class="pill">SSE進捗表示</span>
+            <span class="pill">PDF/DOCX簡易抽出</span>
+            <span class="pill">Dify /chat-messages blocking</span>
+        </footer>
+    </div>
+
+    <script src="{{ url_for('static', filename='app.js') }}"></script>
+</body>
+
+</html>
