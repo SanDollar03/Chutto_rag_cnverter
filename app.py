@@ -11,7 +11,12 @@ from dotenv import load_dotenv
 
 from docx import Document
 from pypdf import PdfReader
+
 from openpyxl import load_workbook
+import xlrd  # for .xls
+
+from pptx import Presentation  # for .pptx (and try .ppt)
+
 
 # -------------------------------
 # .env 読み込み（APIはサーバー側固定）
@@ -24,13 +29,14 @@ HEADER_MODEL_LABEL = "Model : ChatGPT 5.2"
 API_BASE = (os.getenv("DIFY_API_BASE") or "").strip().rstrip("/")
 API_KEY = (os.getenv("DIFY_API_KEY") or "").strip()
 
-# ---- 対象拡張子（xlsx対応）----
+# ---- 対象拡張子（xlsx / xls / xlsm / ppt / pptx 対応）----
 ALLOWED_EXTS = {
     ".txt", ".md", ".csv", ".json", ".log",
     ".html", ".xml", ".yml", ".yaml", ".ini", ".conf",
     ".py", ".js", ".css",
     ".docx", ".pdf",
-    ".xlsx",
+    ".xlsx", ".xls", ".xlsm",
+    ".ppt", ".pptx",
 }
 
 # ---- 入力文字上限（安全）----
@@ -146,7 +152,6 @@ def create_app():
                     yield sse_event("done_one", {"file": relpath, "out": os.path.relpath(out_path, output_dir)})
 
                 except Exception as e:
-                    # ここでもキー/URL/生レスポンスを出さない
                     ng_count += 1
                     yield sse_event("error_one", {"file": relpath, "error": safe_err(str(e))})
 
@@ -216,34 +221,54 @@ def extract_text(path: str, knowledge_style: str = "rag_markdown") -> Tuple[str,
 
     # PDF
     if ext == ".pdf":
-        reader = PdfReader(path)
-        parts = []
-        for i, page in enumerate(reader.pages):
-            txt = page.extract_text() or ""
-            txt = normalize_pdf_like_text(txt)
-            if txt.strip():
-                parts.append(f"[PAGE {i+1}]\n{txt}")
-        return "\n\n".join(parts), meta
+        return extract_pdf_like(path), meta
 
-    # Excel
-    if ext == ".xlsx":
+    # Excel（xlsx/xlsm: openpyxl, xls: xlrd）
+    if ext in {".xlsx", ".xlsm", ".xls"}:
         if knowledge_style == "rag_natural":
-            # 自然言語優先：全体把握しやすい“表”で渡す
-            text = extract_xlsx_as_markdown_tables(path)
+            text = extract_excel_as_markdown_tables(path, ext)
         else:
-            # 標準：1行=1レコード（1行=1チャンクに相性が良い）
-            text = extract_xlsx_as_row_records(path)
+            text = extract_excel_as_row_records(path, ext)
         return text, meta
+
+    # PowerPoint（ppt/pptx: python-pptx）
+    # ※ python-pptx は基本的に .pptx 用。 .ppt は失敗時に変換を促す。
+    if ext in {".ppt", ".pptx"}:
+        return extract_ppt_like(path, ext), meta
 
     raise RuntimeError(f"未対応の拡張子です: {ext}")
 
 
-def extract_xlsx_as_row_records(path: str) -> str:
+# -------------------------
+# PDF like
+# -------------------------
+def extract_pdf_like(path: str) -> str:
+    reader = PdfReader(path)
+    parts = []
+    for i, page in enumerate(reader.pages):
+        txt = page.extract_text() or ""
+        txt = normalize_pdf_like_text(txt)
+        if txt.strip():
+            parts.append(f"[PAGE {i+1}]\n{txt}")
+    return "\n\n".join(parts)
+
+
+# -------------------------
+# Excel: row records (standard/faq)
+# -------------------------
+def extract_excel_as_row_records(path: str, ext: str) -> str:
     """
     標準/FAQ向け：
     - 各シートでヘッダー行を最初の非空行として採用
     - データ行は [ROW] {json...} で列名:値 を明示
     """
+    if ext == ".xls":
+        return extract_xls_as_row_records(path)
+    else:
+        return extract_xlsx_like_as_row_records(path)
+
+
+def extract_xlsx_like_as_row_records(path: str) -> str:
     wb = load_workbook(path, data_only=True, read_only=True)
     out: List[str] = []
 
@@ -293,13 +318,77 @@ def extract_xlsx_as_row_records(path: str) -> str:
     return "\n".join(out).strip()
 
 
-def extract_xlsx_as_markdown_tables(path: str) -> str:
+def extract_xls_as_row_records(path: str) -> str:
+    wb = xlrd.open_workbook(path)
+    out: List[str] = []
+
+    for sheet in wb.sheets():
+        out.append(f"[SHEET: {sheet.name}]")
+
+        if sheet.nrows <= 0:
+            out.append("[EMPTY]")
+            out.append("")
+            continue
+
+        # rows as list of lists
+        rows = []
+        for r in range(sheet.nrows):
+            rows.append([sheet.cell_value(r, c) for c in range(sheet.ncols)])
+
+        header: Optional[List[str]] = None
+        start_idx = 0
+        for i, r in enumerate(rows):
+            if any(cell is not None and str(cell).strip() != "" for cell in r):
+                header = [sanitize_header(cell) for cell in r]
+                start_idx = i + 1
+                break
+
+        if not header:
+            out.append("[EMPTY]")
+            out.append("")
+            continue
+
+        out.append("[HEADER] " + "\t".join([h if h else "" for h in header]))
+
+        for ridx in range(start_idx, len(rows)):
+            r = rows[ridx]
+            if not any(cell is not None and str(cell).strip() != "" for cell in r):
+                continue
+
+            record = {}
+            for cidx, cell in enumerate(r):
+                key = header[cidx] if cidx < len(header) else f"COL{cidx+1}"
+                if not key:
+                    key = f"COL{cidx+1}"
+                val = "" if cell is None else str(cell).strip()
+                if val != "":
+                    record[key] = val
+
+            if record:
+                out.append("[ROW] " + json.dumps(record, ensure_ascii=False, separators=(",", ":")))
+
+        out.append("")
+
+    return "\n".join(out).strip()
+
+
+# -------------------------
+# Excel: markdown tables (rag_natural)
+# -------------------------
+def extract_excel_as_markdown_tables(path: str, ext: str) -> str:
     """
     自然言語向け：
-    - シートごとにMarkdownテーブルとして提示し、構成把握→自然言語で章立てしやすくする
+    - シートごとにMarkdownテーブルとして提示
     - 行数が多い場合は先頭N行まで（安全）
     """
-    MAX_ROWS_PER_SHEET = 200  # 必要なら増やす
+    if ext == ".xls":
+        return extract_xls_as_markdown_tables(path)
+    else:
+        return extract_xlsx_like_as_markdown_tables(path)
+
+
+def extract_xlsx_like_as_markdown_tables(path: str) -> str:
+    MAX_ROWS_PER_SHEET = 200
     wb = load_workbook(path, data_only=True, read_only=True)
 
     out: List[str] = []
@@ -352,6 +441,97 @@ def extract_xlsx_as_markdown_tables(path: str) -> str:
         out.append("")
 
     return "\n".join(out).strip()
+
+
+def extract_xls_as_markdown_tables(path: str) -> str:
+    MAX_ROWS_PER_SHEET = 200
+    wb = xlrd.open_workbook(path)
+    out: List[str] = []
+
+    for sheet in wb.sheets():
+        out.append(f"[SHEET: {sheet.name}]")
+
+        if sheet.nrows <= 0:
+            out.append("(empty)")
+            out.append("")
+            continue
+
+        rows = []
+        for r in range(sheet.nrows):
+            rows.append([sheet.cell_value(r, c) for c in range(sheet.ncols)])
+
+        header = None
+        start_idx = 0
+        for i, r in enumerate(rows):
+            if any(cell is not None and str(cell).strip() != "" for cell in r):
+                header = [sanitize_header(c) for c in r]
+                start_idx = i + 1
+                break
+        if not header:
+            out.append("(empty)")
+            out.append("")
+            continue
+
+        cols = [h if h else f"COL{j+1}" for j, h in enumerate(header)]
+
+        out.append("| " + " | ".join(cols) + " |")
+        out.append("| " + " | ".join(["---"] * len(cols)) + " |")
+
+        count = 0
+        for ridx in range(start_idx, len(rows)):
+            r = rows[ridx]
+            if not any(cell is not None and str(cell).strip() != "" for cell in r):
+                continue
+
+            vals = []
+            for cidx in range(len(cols)):
+                cell = r[cidx] if cidx < len(r) else None
+                v = "" if cell is None else str(cell).strip()
+                v = v.replace("\n", " ").replace("\r", " ")
+                v = v.replace("|", "\\|")
+                vals.append(v)
+
+            out.append("| " + " | ".join(vals) + " |")
+            count += 1
+            if count >= MAX_ROWS_PER_SHEET:
+                out.append(f"(… {MAX_ROWS_PER_SHEET}行まで表示。続きは省略 …)")
+                break
+
+        out.append("")
+
+    return "\n".join(out).strip()
+
+
+# -------------------------
+# PowerPoint like (ppt/pptx)
+# -------------------------
+def extract_ppt_like(path: str, ext: str) -> str:
+    """
+    .pptx: python-pptx でスライド単位に抽出
+    .ppt : python-pptx 非対応のことが多いので、失敗したら変換を促す
+    """
+    try:
+        prs = Presentation(path)
+    except Exception:
+        if ext == ".ppt":
+            raise RuntimeError("`.ppt`（旧形式）は python-pptx で直接読めない場合があります。`.pptx` に変換して再実行してください。")
+        raise RuntimeError("PowerPointの解析に失敗しました。ファイル破損または形式が想定外です。")
+
+    parts: List[str] = []
+    for i, slide in enumerate(prs.slides):
+        slide_text: List[str] = []
+        for shape in slide.shapes:
+            if hasattr(shape, "text"):
+                t = (shape.text or "").strip()
+                if t:
+                    slide_text.append(t)
+
+        txt = "\n".join(slide_text)
+        txt = normalize_pdf_like_text(txt)
+        if txt.strip():
+            parts.append(f"[SLIDE {i+1}]\n{txt}")
+
+    return "\n\n".join(parts)
 
 
 def sanitize_header(cell) -> str:
@@ -501,7 +681,7 @@ def build_rag_instruction(source_path: str, source_meta: Dict[str, str], knowled
 
     # Excel特別ルール（標準/FAQのみ：rag_naturalでは無効）
     excel_rules = ""
-    if ext == ".xlsx" and knowledge_style != "rag_natural":
+    if ext in {".xlsx", ".xls", ".xlsm"} and knowledge_style != "rag_natural":
         excel_rules = f"""
         # Excel特別ルール（標準/FAQ用）
         - 入力には [HEADER] と [ROW] が含まれる。
