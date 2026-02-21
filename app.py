@@ -23,7 +23,7 @@ from pptx import Presentation  # for .pptx (and try .ppt)
 # -------------------------------
 load_dotenv()
 
-APP_TITLE = "Chuっと👄RAGナレッジ変換（Markdown）"
+APP_TITLE = "ChuっとRAGコンバーター for md"
 HEADER_MODEL_LABEL = "Model : ChatGPT 5.2"
 
 API_BASE = (os.getenv("DIFY_API_BASE") or "").strip().rstrip("/")
