@@ -14,12 +14,13 @@
     <div class="wrap">
         <header class="topbar">
             <div class="topbar-row">
-                <div>
-                    <div class="title">{{ title }}</div>
-                    <div class="sub">Akira Takasugi</div>
-                </div>
 
+                <!-- 左：バナー画像 -->
+                <img class="topbar-banner" src="{{ url_for('static', filename='banner.png') }}" alt="ChuっとRagコンバーター" />
+
+                <!-- 右：モデル表示 -->
                 <div class="model-pill">{{ model_label }}</div>
+
             </div>
         </header>
 
